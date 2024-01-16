@@ -3,7 +3,8 @@
 import os
 import signal
 import sys
-import syslog
+import traceback
+import logging
 
 from lockfile import FileLock, LockTimeout, AlreadyLocked
 from twisted.cred import portal
@@ -21,6 +22,7 @@ from jasmin.bin import BaseDaemon
 
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
 
+LOG_CATEGORY = "jasmin-interceptor-daemon"
 
 class Options(usage.Options):
     optParameters = [
@@ -30,6 +32,18 @@ class Options(usage.Options):
 
 
 class InterceptorDaemon(BaseDaemon):
+    def __init__(self, opt):
+        super(InterceptorDaemon, self).__init__(opt)
+
+        self.log = logging.getLogger(LOG_CATEGORY)
+        self.log.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(process)d %(message)s', '%Y-%m-%d %H:%M:%S')
+        handler.setFormatter(formatter)
+        self.log.addHandler(handler)
+        self.log.propagate = False
+
+    @defer.inlineCallbacks
     def startInterceptorPBService(self):
         """Start Interceptor PB server"""
 
@@ -48,7 +62,7 @@ class InterceptorDaemon(BaseDaemon):
         jPBPortalRoot = JasminPBPortalRoot(p)
 
         # Add service
-        self.components['interceptor-pb-server'] = reactor.listenTCP(
+        self.components['interceptor-pb-server'] = yield reactor.listenTCP(
             InterceptorPBConfigInstance.port,
             pb.PBServerFactory(jPBPortalRoot),
             interface=InterceptorPBConfigInstance.bind)
@@ -60,31 +74,31 @@ class InterceptorDaemon(BaseDaemon):
     @defer.inlineCallbacks
     def start(self):
         """Start Interceptord daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Starting InterceptorPB Daemon ...")
+        self.log.info("Starting InterceptorPB Daemon ...")
 
         ########################################################
         # Start Interceptor PB server
         try:
             yield self.startInterceptorPBService()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start Interceptor: %s" % e)
+            self.log.error("  Cannot start Interceptor: %s\n%s" % (e, traceback.format_exc()))
         else:
-            syslog.syslog(syslog.LOG_INFO, "  Interceptor Started.")
+            self.log.info("  Interceptor Started.")
 
     @defer.inlineCallbacks
     def stop(self):
         """Stop Interceptord daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Stopping Interceptor Daemon ...")
+        self.log.info("Stopping Interceptor Daemon ...")
 
         if 'interceptor-pb-server' in self.components:
             yield self.stopInterceptorPBService()
-            syslog.syslog(syslog.LOG_INFO, "  InterceptorPB stopped.")
+            self.log.info("  InterceptorPB stopped.")
 
         reactor.stop()
 
     def sighandler_stop(self, signum, frame):
         """Handle stop signal cleanly"""
-        syslog.syslog(syslog.LOG_INFO, "Received signal to stop Interceptor Daemon")
+        self.log.info("Received signal to stop Interceptor Daemon")
 
         return self.stop()
 
