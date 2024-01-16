@@ -59,8 +59,7 @@ class Options(usage.Options):
         ['disable-smpp-server', None, 'Do not start SMPP Server service'],
         ['enable-dlr-thrower', None, 'Enable DLR Thrower service (not recommended: start the dlrd daemon instead)'],
         ['enable-dlr-lookup', None, 'Enable DLR Lookup service (not recommended: start the dlrlookupd daemon instead)'],
-        # @TODO: deliver-thrower must be executed as a standalone process, just like dlr-thrower
-        ['disable-deliver-thrower', None, 'Do not start DeliverSm Thrower service'],
+        ['enable-deliver-thrower', None, 'Enable DeliverSm Thrower service (not recommended: start the deliversmd daemon instead)'],
         ['disable-http-api', None, 'Do not start HTTP API'],
         ['disable-jcli', None, 'Do not start jCli console'],
         ['enable-interceptor-client', None, 'Start Interceptor client'],
@@ -89,32 +88,33 @@ class JasminDaemon(BaseDaemon):
             yield self.components['rc'].auth(RedisForJasminConfigInstance.password)
             yield self.components['rc'].select(RedisForJasminConfigInstance.dbid)
 
+    @defer.inlineCallbacks
     def stopRedisClient(self):
         """Stop AMQP Broker"""
-        return self.components['rc'].disconnect()
+        yield self.components['rc'].disconnect()
 
     def startAMQPBrokerService(self):
         """Start AMQP Broker"""
 
         AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
-        self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
-        self.components['amqp-broker-factory'].preConnect()
+        amqp_factory = AmqpFactory(AMQPServiceConfigInstance)
+        amqp_factory.preConnect()
+        
+        return {
+            'factory': amqp_factory,
+            'client': reactor.connectTCP(
+                    AMQPServiceConfigInstance.host,
+                    AMQPServiceConfigInstance.port,
+                    amqp_factory
+                )
+        }
 
-        # Add service
-        self.components['amqp-broker-client'] = reactor.connectTCP(
-            AMQPServiceConfigInstance.host,
-            AMQPServiceConfigInstance.port,
-            self.components['amqp-broker-factory'])
-
-    def stopAMQPBrokerService(self):
-        """Stop AMQP Broker"""
-
-        return self.components['amqp-broker-client'].disconnect()
-
+    @defer.inlineCallbacks
     def startRouterPBService(self):
         """Start Router PB server"""
 
         RouterPBConfigInstance = RouterPBConfig(self.options['config'])
+        
         self.components['router-pb-factory'] = RouterPB(RouterPBConfigInstance)
 
         # Set authentication portal
@@ -135,12 +135,28 @@ class JasminDaemon(BaseDaemon):
             interface=RouterPBConfigInstance.bind)
 
         # AMQP Broker is used to listen to deliver_sm/dlr queues
-        return self.components['router-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
+        self.components['router-pb-amqp'] = self.startAMQPBrokerService()
+        yield self.components['router-pb-amqp']['factory'].getChannelReadyDeferred()
+        self.log.info("RouterPB AMQP service started.")
+        self.components['router-pb-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshRouterPBAMQPService)
 
+        yield self.components['router-pb-factory'].addAmqpBroker(self.components['router-pb-amqp']['factory'])
+
+    @defer.inlineCallbacks
+    def refreshRouterPBAMQPService(self, ignore):
+        """Refresh AMQP Broker connection"""
+        self.log.info("Refreshing RouterPB AMQP service ...")
+        yield self.components['router-pb-amqp']['factory'].getChannelReadyDeferred()
+        self.components['router-pb-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshRouterPBAMQPService)
+        yield self.components['router-pb-factory'].addAmqpBroker(self.components['router-pb-amqp']['factory'])
+
+    @defer.inlineCallbacks
     def stopRouterPBService(self):
         """Stop Router PB server"""
-        return self.components['router-pb-server'].stopListening()
+        yield self.components['router-pb-server'].stopListening()
+        yield self.components['router-pb-amqp']['client'].disconnect()
 
+    @defer.inlineCallbacks
     def startSMPPClientManagerPBService(self):
         """Start SMPP Client Manager PB server"""
 
@@ -164,7 +180,11 @@ class JasminDaemon(BaseDaemon):
             interface=SMPPClientPBConfigInstance.bind)
 
         # AMQP Broker is used to listen to submit_sm queues and publish to deliver_sm/dlr queues
-        self.components['smppcm-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
+        self.components['smppcm-pb-amqp'] = self.startAMQPBrokerService()
+        yield self.components['smppcm-pb-amqp']['factory'].getChannelReadyDeferred()
+        self.log.info("SMPPClientManagerPB AMQP service started.")
+
+        self.components['smppcm-pb-factory'].addAmqpBroker(self.components['smppcm-pb-amqp']['factory'])
         self.components['smppcm-pb-factory'].addRedisClient(self.components['rc'])
         self.components['smppcm-pb-factory'].addRouterPB(self.components['router-pb-factory'])
 
@@ -173,18 +193,37 @@ class JasminDaemon(BaseDaemon):
             self.components['smppcm-pb-factory'].addInterceptorPBClient(
                 self.components['interceptor-pb-client'])
 
+    @defer.inlineCallbacks
     def stopSMPPClientManagerPBService(self):
         """Stop SMPP Client Manager PB server"""
-        return self.components['smppcm-pb-server'].stopListening()
+        yield self.components['smppcm-pb-server'].stopListening()
+        yield self.components['smppcm-pb-amqp']['client'].disconnect()
 
     @defer.inlineCallbacks
     def startDLRLookupService(self):
         """Start DLRLookup"""
+        self.components['dlrlookup-amqp'] = self.startAMQPBrokerService()
+        yield self.components['dlrlookup-amqp']['factory'].getChannelReadyDeferred()
+        self.log.info("DLRLookup AMQP service started.")
+        self.components['dlrlookup-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshDLRLookupAMQPService)
 
         DLRLookupConfigInstance = DLRLookupConfig(self.options['config'])
-        self.components['dlrlookup'] = DLRLookup(DLRLookupConfigInstance, self.components['amqp-broker-factory'],
+        self.components['dlrlookup'] = DLRLookup(DLRLookupConfigInstance, self.components['dlrlookup-amqp']['factory'],
                                                  self.components['rc'])
         yield self.components['dlrlookup'].subscribe()
+
+    @defer.inlineCallbacks
+    def refreshDLRLookupAMQPService(self, ignore):
+        """Refresh AMQP Broker connection"""
+        self.log.info("Refreshing DLRLookup AMQP service ...")
+        yield self.components['dlrlookup-amqp']['factory'].getChannelReadyDeferred()
+        self.components['dlrlookup-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshDLRLookupAMQPService)
+        yield self.components['dlrlookup'].subscribe()
+
+    @defer.inlineCallbacks
+    def stopDLRLookupService(self):
+        """Stop DLRLookup"""
+        yield self.components['dlrlookup-amqp']['client'].disconnect()
 
     def startSMPPServerPBService(self):
         """Start SMPP Server PB server"""
@@ -246,6 +285,7 @@ class JasminDaemon(BaseDaemon):
         """Stop SMPP Server"""
         return self.components['smpp-server'].stopListening()
 
+    @defer.inlineCallbacks
     def startdeliverSmThrowerService(self):
         """Start deliverSmThrower"""
 
@@ -254,12 +294,28 @@ class JasminDaemon(BaseDaemon):
         self.components['deliversm-thrower'].addSmpps(self.components['smpp-server-factory'])
 
         # AMQP Broker is used to listen to deliver_sm queue
-        return self.components['deliversm-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
+        self.components['deliversm-thrower-amqp'] = self.startAMQPBrokerService()
+        yield self.components['deliversm-thrower-amqp']['factory'].getChannelReadyDeferred()
+        self.log.info("deliverSmThrower AMQP service started.")
+        self.components['deliversm-thrower-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshdeliverSmThrowerAMQPService)
 
+        yield self.components['deliversm-thrower'].addAmqpBroker(self.components['deliversm-thrower-amqp']['factory'])
+
+    @defer.inlineCallbacks
+    def refreshdeliverSmThrowerAMQPService(self, ignore):
+        """Refresh AMQP Broker connection"""
+        self.log.info("Refreshing deliverSmThrower AMQP service ...")
+        yield self.components['deliversm-thrower-amqp']['factory'].getChannelReadyDeferred()
+        self.components['deliversm-thrower-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshdeliverSmThrowerAMQPService)
+        yield self.components['deliversm-thrower'].addAmqpBroker(self.components['deliversm-thrower-amqp']['factory'])
+
+    @defer.inlineCallbacks
     def stopdeliverSmThrowerService(self):
         """Stop deliverSmThrower"""
-        return self.components['deliversm-thrower'].stopService()
+        yield self.components['deliversm-thrower'].stopService()
+        yield self.components['deliversm-thrower-amqp']['client'].disconnect()
 
+    @defer.inlineCallbacks
     def startDLRThrowerService(self):
         """Start DLRThrower"""
 
@@ -268,11 +324,26 @@ class JasminDaemon(BaseDaemon):
         self.components['dlr-thrower'].addSmpps(self.components['smpp-server-factory'])
 
         # AMQP Broker is used to listen to DLRThrower queue
-        return self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
+        self.components['dlr-thrower-amqp'] = self.startAMQPBrokerService()
+        yield self.components['dlr-thrower-amqp']['factory'].getChannelReadyDeferred()
+        self.log.info("DLRThrower AMQP service started.")
+        self.components['dlr-thrower-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshDLRThrowerAMQPService)
 
+        yield self.components['dlr-thrower'].addAmqpBroker(self.components['dlr-thrower-amqp']['factory'])
+
+    @defer.inlineCallbacks
+    def refreshDLRThrowerAMQPService(self, ignore):
+        """Refresh AMQP Broker connection"""
+        self.log.info("Refreshing DLRThrower AMQP service ...")
+        yield self.components['dlr-thrower-amqp']['factory'].getChannelReadyDeferred()
+        self.components['dlr-thrower-amqp']['factory'].getChannelDownDeferred().addCallback(self.refreshDLRThrowerAMQPService)
+        yield self.components['dlr-thrower'].addAmqpBroker(self.components['dlr-thrower-amqp']['factory'])
+
+    @defer.inlineCallbacks
     def stopDLRThrowerService(self):
         """Stop DLRThrower"""
-        return self.components['dlr-thrower'].stopService()
+        yield self.components['dlr-thrower'].stopService()
+        yield self.components['dlr-thrower-amqp']['client'].disconnect()
 
     def startHTTPApiService(self):
         """Start HTTP Api"""
@@ -342,7 +413,7 @@ class JasminDaemon(BaseDaemon):
             return self.components['interceptor-pb-client'].disconnect()
 
     @defer.inlineCallbacks
-    def start(self):
+    def startDaemon(self):
         """Start Jasmind daemon"""
         self.log.info("Starting Jasmin Daemon ...")
 
@@ -368,16 +439,6 @@ class JasminDaemon(BaseDaemon):
             self.log.info("  RedisClient Started.")
 
         ########################################################
-        # Start AMQP Broker
-        try:
-            yield self.startAMQPBrokerService()
-            yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
-        except Exception as e:
-            self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
-        else:
-            self.log.info("  AMQP Broker Started.")
-
-        ########################################################
         # Start Router PB server
         try:
             yield self.startRouterPBService()
@@ -389,7 +450,7 @@ class JasminDaemon(BaseDaemon):
         ########################################################
         # Start SMPP Client connector manager and add rc
         try:
-            self.startSMPPClientManagerPBService()
+            yield self.startSMPPClientManagerPBService()
         except Exception as e:
             self.log.error("  Cannot start SMPPClientManagerPB: %s\n%s" % (e, traceback.format_exc()))
         else:
@@ -399,7 +460,7 @@ class JasminDaemon(BaseDaemon):
         if self.options['enable-dlr-lookup']:
             try:
                 # [optional] Start DLR Lookup
-                self.startDLRLookupService()
+                yield self.startDLRLookupService()
             except Exception as e:
                 self.log.error("  Cannot start DLRLookup: %s\n%s" % (e, traceback.format_exc()))
             else:
@@ -425,7 +486,7 @@ class JasminDaemon(BaseDaemon):
                 self.log.info("  SMPPServer Started.")
 
         ########################################################
-        if not self.options['disable-deliver-thrower']:
+        if self.options['enable-deliver-thrower']:
             try:
                 # [optional] Start deliverSmThrower
                 yield self.startdeliverSmThrowerService()
@@ -465,7 +526,7 @@ class JasminDaemon(BaseDaemon):
                 self.log.info("  jCli Started.")
 
     @defer.inlineCallbacks
-    def stop(self):
+    def stopDaemons(self):
         """Stop Jasmind daemon"""
         self.log.info("Stopping Jasmin Daemon ...")
 
@@ -492,6 +553,10 @@ class JasminDaemon(BaseDaemon):
         if 'smpp-server' in self.components:
             yield self.stopSMPPServerService()
             self.log.info("  SMPPServer stopped.")
+        
+        if 'dlrlookup' in self.components:
+            yield self.stopDLRLookupService()
+            self.log.info("  DLRLookup stopped.")
 
         if 'smppcm-pb-server' in self.components:
             yield self.stopSMPPClientManagerPBService()
@@ -500,10 +565,6 @@ class JasminDaemon(BaseDaemon):
         if 'router-pb-server' in self.components:
             yield self.stopRouterPBService()
             self.log.info("  RouterPB stopped.")
-
-        if 'amqp-broker-client' in self.components:
-            yield self.stopAMQPBrokerService()
-            self.log.info("  AMQP Broker disconnected.")
 
         if 'rc' in self.components:
             yield self.stopRedisClient()
@@ -520,7 +581,7 @@ class JasminDaemon(BaseDaemon):
         """Handle stop signal cleanly"""
         self.log.info("Received signal to stop Jasmin Daemon")
 
-        return self.stop()
+        return self.stopDaemons()
 
 
 if __name__ == '__main__':
@@ -541,7 +602,7 @@ if __name__ == '__main__':
         signal.signal(signal.SIGINT, ja_d.sighandler_stop)
         signal.signal(signal.SIGTERM, ja_d.sighandler_stop)
         # Start JasminDaemon
-        ja_d.start()
+        ja_d.startDaemon()
 
         reactor.run()
     except usage.UsageError as errortext:
