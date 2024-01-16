@@ -18,7 +18,6 @@ class AmqpFactory(ClientFactory):
         self.connectionRetry = True
         self.connected = False
         self.config = config
-        self.channelReady = None
 
         self.delegate = TwistedDelegate()
 
@@ -50,8 +49,24 @@ class AmqpFactory(ClientFactory):
         self.connectionRetry = True
 
         self.exitDeferred = defer.Deferred()
-        if self.channelReady is None:
+        
+        try:
+            self.channelReady
+
+            # Reset deferred if it were called before
+            if self.channelReady.called is True:
+                self.channelReady = defer.Deferred()
+        except AttributeError:
             self.channelReady = defer.Deferred()
+
+        try:
+            self.channelDown
+
+            # Reset deferred if it were called before
+            if self.channelDown.called is True:
+                self.channelDown = defer.Deferred()
+        except AttributeError:
+            self.channelDown = defer.Deferred()
 
         try:
             # Check if connectDeferred is already set
@@ -79,13 +94,42 @@ class AmqpFactory(ClientFactory):
     def getChannelReadyDeferred(self):
         """Get a Deferred so you can be notified when channel is ready
         """
+        try:
+            self.channelReady
+
+            # Reset deferred if it were called before
+            if self.channelReady.called is True:
+                self.channelReady = defer.Deferred()
+        except AttributeError:
+            self.channelReady = defer.Deferred()
         return self.channelReady
+
+    def getChannelDownDeferred(self):
+        """Get a Deferred so you can be notified when channel is down
+        """
+        try:
+            self.channelDown
+
+            # Reset deferred if it were called before
+            if self.channelDown.called is True:
+                self.channelDown = defer.Deferred()
+        except AttributeError:
+            self.channelDown = defer.Deferred()
+
+        return self.channelDown
 
     def clientConnectionFailed(self, connector, reason):
         """Connection failed
         """
         self.log.error("Connection failed. Reason: %s", str(reason))
         self.connected = False
+
+        self.client = None
+        
+        if self.channelReady.called is True:
+            self.channelReady = defer.Deferred()
+
+        self.channelDown.callback(self)
 
         if self.config.reconnectOnConnectionFailure and self.connectionRetry:
             self.log.info("Reconnecting after %d seconds ...", self.config.reconnectOnConnectionFailureDelay)
@@ -107,6 +151,11 @@ class AmqpFactory(ClientFactory):
         self.connected = False
 
         self.client = None
+        
+        if self.channelReady.called is True:
+            self.channelReady = defer.Deferred()
+
+        self.channelDown.callback(self)
 
         if self.config.reconnectOnConnectionLoss and self.connectionRetry:
             self.log.info("Reconnecting after %d seconds ...", self.config.reconnectOnConnectionLossDelay)
@@ -178,6 +227,10 @@ class AmqpFactory(ClientFactory):
 
         # Flag that the connection is open.
         self.connected = True
+
+        if self.channelDown.called is True:
+            self.channelDown = defer.Deferred()
+
         self.channelReady.callback(self)
 
     def _channel_open_failed(self, error):
@@ -192,6 +245,9 @@ class AmqpFactory(ClientFactory):
     def disconnect(self, reason=None):
         self.channelReady = False
 
+        if self.channelDown.called is False:
+            self.channelDown.callback(self)
+            
         if self.client is not None:
             return self.client.close(reason)
 
