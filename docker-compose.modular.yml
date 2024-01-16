@@ -1,0 +1,532 @@
+version: "3"
+name: jasmin-modular
+services:
+  redis:
+    image: redis:latest
+    restart: unless-stopped
+    hostname: '${REDIS_CLIENT_HOST:-redis}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - redis:/data
+    networks:
+      - jasmin-network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      retries: 3
+      timeout: 5s
+
+  rabbit-mq:
+    image: rabbitmq:management
+    restart: unless-stopped
+    hostname: '${AMQP_BROKER_HOST:-rabbit-mq}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - '${FORWARD_RABBIT_MQ_MANAGEMENT_PORT:-15672}:15672'
+    volumes:
+      - rabbitmq:/var/lib/rabbitmq
+    networks:
+      - jasmin-network
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "-q", "ping" ]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
+  jasmind:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${JASMIND_HOST:-jasmind}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - '${FORWARD_JASMIND_SMPP_PORT:-2775}:2775'
+      - '${FORWARD_JASMIND_CLI_PORT:-8990}:8990'
+      - '${FORWARD_JASMIND_HTTP_PORT:-1401}:1401'
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbit-mq:
+        condition: service_healthy
+    environment:
+      Daemon: jasmind
+      SMPP_SERVER_ID: ${SMPP_SERVER_ID:-smpps_01}
+      SMPP_SERVER_BIND: ${SMPP_SERVER_BIND:-0.0.0.0}
+      SMPP_SERVER_PORT: ${SMPP_SERVER_PORT:-2775}
+      SMPP_SERVER_BILLING_FEATURE: ${SMPP_SERVER_BILLING_FEATURE:-True}
+      SMPP_SERVER_SESSIONINITTIMERSECS: ${SMPP_SERVER_SESSIONINITTIMERSECS:-30}
+      SMPP_SERVER_ENQUIRELINKTIMERSECS: ${SMPP_SERVER_ENQUIRELINKTIMERSECS:-30}
+      SMPP_SERVER_INACTIVITYTIMERSECS: ${SMPP_SERVER_INACTIVITYTIMERSECS:-300}
+      SMPP_SERVER_RESPONSETIMERSECS: ${SMPP_SERVER_RESPONSETIMERSECS:-60}
+      SMPP_SERVER_PDUREADTIMERSECS: ${SMPP_SERVER_PDUREADTIMERSECS:-10}
+      SMPP_SERVER_DLR_EXPIRY: ${SMPP_SERVER_DLR_EXPIRY:-86400}
+      SMPP_SERVER_LOG_FILE: ${SMPP_SERVER_LOG_FILE:-stdout}
+      SMPP_SERVER_LOG_LEVEL: ${SMPP_SERVER_LOG_LEVEL:-WARNING}
+      SMPP_SERVER_LOG_ROTATE: ${SMPP_SERVER_LOG_ROTATE:-midnight}
+      SMPP_SERVER_LOG_FORMAT: ${SMPP_SERVER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      SMPP_SERVER_LOG_DATE_FORMAT: ${SMPP_SERVER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      SMPP_SERVER_LOG_PRIVACY: ${SMPP_SERVER_LOG_PRIVACY:-False}
+
+      SMPP_SERVER_PB_BIND: ${SMPP_SERVER_PB_BIND:-0.0.0.0}
+      SMPP_SERVER_PB_PORT: ${SMPP_SERVER_PB_PORT:-14000}
+      SMPP_SERVER_PB_AUTHENTICATION: ${SMPP_SERVER_PB_AUTHENTICATION:-True}
+      SMPP_SERVER_PB_ADMIN_USERNAME: ${SMPP_SERVER_PB_ADMIN_USERNAME:-smppsadmin}
+      SMPP_SERVER_PB_ADMIN_PASSWORD: ${SMPP_SERVER_PB_ADMIN_PASSWORD:-e97ab122faa16beea8682d84f3d2eea4}
+      SMPP_SERVER_PB_LOG_FILE: ${SMPP_SERVER_PB_LOG_FILE:-stdout}
+      SMPP_SERVER_PB_LOG_LEVEL: ${SMPP_SERVER_PB_LOG_LEVEL:-WARNING}
+      SMPP_SERVER_PB_LOG_ROTATE: ${SMPP_SERVER_PB_LOG_ROTATE:-midnight}
+      SMPP_SERVER_PB_LOG_FORMAT: ${SMPP_SERVER_PB_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      SMPP_SERVER_PB_LOG_DATE_FORMAT: ${SMPP_SERVER_PB_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      CLIENT_MANAGEMENT_STORE_PATH: ${CLIENT_MANAGEMENT_STORE_PATH:-/etc/jasmin/store}
+      CLIENT_MANAGEMENT_BIND: ${CLIENT_MANAGEMENT_BIND:-0.0.0.0}
+      CLIENT_MANAGEMENT_PORT: ${CLIENT_MANAGEMENT_PORT:-8989}
+      CLIENT_MANAGEMENT_AUTHENTICATION: ${CLIENT_MANAGEMENT_AUTHENTICATION:-True}
+      CLIENT_MANAGEMENT_ADMIN_USERNAME: ${CLIENT_MANAGEMENT_ADMIN_USERNAME:-cmadmin}
+      CLIENT_MANAGEMENT_ADMIN_PASSWORD: ${CLIENT_MANAGEMENT_ADMIN_PASSWORD:-e1c5136acafb7016bc965597c992eb82}
+      CLIENT_MANAGEMENT_LOG_FILE: ${CLIENT_MANAGEMENT_LOG_FILE:-stdout}
+      CLIENT_MANAGEMENT_LOG_LEVEL: ${CLIENT_MANAGEMENT_LOG_LEVEL:-WARNING}
+      CLIENT_MANAGEMENT_LOG_ROTATE: ${CLIENT_MANAGEMENT_LOG_ROTATE:-midnight}
+      CLIENT_MANAGEMENT_LOG_FORMAT: ${CLIENT_MANAGEMENT_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      CLIENT_MANAGEMENT_LOG_DATE_FORMAT: ${CLIENT_MANAGEMENT_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      CLIENT_MANAGEMENT_PICKLE_PROTOCOL: ${CLIENT_MANAGEMENT_PICKLE_PROTOCOL:-2}
+
+      SERVICE_SMPPCLIENT_LOG_FILE: ${SERVICE_SMPPCLIENT_LOG_FILE:-stdout}
+      SERVICE_SMPPCLIENT_LOG_LEVEL: ${SERVICE_SMPPCLIENT_LOG_LEVEL:-WARNING}
+      SERVICE_SMPPCLIENT_LOG_ROTATE: ${SERVICE_SMPPCLIENT_LOG_ROTATE:-midnight}
+      SERVICE_SMPPCLIENT_LOG_FORMAT: ${SERVICE_SMPPCLIENT_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      SERVICE_SMPPCLIENT_LOG_DATE_FORMAT: ${SERVICE_SMPPCLIENT_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      SM_LISTENER_PUBLISH_SUBMIT_SM_RESP: ${SM_LISTENER_PUBLISH_SUBMIT_SM_RESP:-False}
+      SM_LISTENER_SUBMIT_ERROR_RETRIAL: '{"ESME_RSYSERR":{"count":2,"delay":30},"ESME_RTHROTTLED":{"count":20,"delay":30},"ESME_RMSGQFUL":{"count":2,"delay":180},"ESME_RINVSCHED":{"count":2,"delay":300},}'
+      SM_LISTENER_SUBMIT_MAX_AGE_SMPPC_NOT_READY: ${SM_LISTENER_SUBMIT_MAX_AGE_SMPPC_NOT_READY:-1200}
+      SM_LISTENER_SUBMIT_RETRIAL_DELAY_SMPPC_NOT_READY: ${SM_LISTENER_SUBMIT_RETRIAL_DELAY_SMPPC_NOT_READY:-30}
+      SM_LISTENER_LOG_FILE: ${SM_LISTENER_LOG_FILE:-stdout}
+      SM_LISTENER_LOG_LEVEL: ${SM_LISTENER_LOG_LEVEL:-WARNING}
+      SM_LISTENER_LOG_ROTATE: ${SM_LISTENER_LOG_ROTATE:-midnight}
+      SM_LISTENER_LOG_FORMAT: ${SM_LISTENER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      SM_LISTENER_LOG_DATE_FORMAT: ${SM_LISTENER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      SM_LISTENER_LOG_PRIVACY: ${SM_LISTENER_LOG_PRIVACY:-False}
+
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_SPEC: ${AMQP_BROKER_SPEC:-/etc/jasmin/resource/amqp0-9-1.xml}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_HEARTBEAT: ${AMQP_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_LOG_FILE: ${AMQP_BROKER_LOG_FILE:-stdout}
+      AMQP_BROKER_LOG_LEVEL: ${AMQP_BROKER_LOG_LEVEL:-WARNING}
+      AMQP_BROKER_LOG_ROTATE: ${AMQP_BROKER_LOG_ROTATE:-midnight}
+      AMQP_BROKER_LOG_FORMAT: ${AMQP_BROKER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      AMQP_BROKER_LOG_DATE_FORMAT: ${AMQP_BROKER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY:-True}
+      AMQP_BROKER_CONNECTION_FAILURE_RETRY: ${AMQP_BROKER_CONNECTION_FAILURE_RETRY:-True}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY:-10}
+      AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY:-10}
+
+      HTTP_API_BIND: ${HTTP_API_BIND:-0.0.0.0}
+      HTTP_API_PORT: ${HTTP_API_PORT:-1401}
+      HTTP_API_BILLING_FEATURE: ${HTTP_API_BILLING_FEATURE:-True}
+      HTTP_API_LONG_CONTENT_MAX_PARTS: ${HTTP_API_LONG_CONTENT_MAX_PARTS:-5}
+      HTTP_API_LONG_CONTENT_SPLIT: ${HTTP_API_LONG_CONTENT_SPLIT:-sar}
+      HTTP_API_ACCESS_LOG: ${HTTP_API_ACCESS_LOG:-stdout}
+      HTTP_API_LOG_FILE: ${HTTP_API_LOG_FILE:-stdout}
+      HTTP_API_LOG_LEVEL: ${HTTP_API_LOG_LEVEL:-WARNING}
+      HTTP_API_LOG_ROTATE: ${HTTP_API_LOG_ROTATE:-midnight}
+      HTTP_API_LOG_FORMAT: ${HTTP_API_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      HTTP_API_LOG_DATE_FORMAT: ${HTTP_API_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      HTTP_API_LOG_PRIVACY: ${HTTP_API_LOG_PRIVACY:-False}
+
+      ROUTER_STORE_PATH: ${ROUTER_STORE_PATH:-/etc/jasmin/store}
+      ROUTER_PERSISTENCE_TIMER_SECS: ${ROUTER_PERSISTENCE_TIMER_SECS:-60}
+      ROUTER_BIND: ${ROUTER_BIND:-0.0.0.0}
+      ROUTER_PORT: ${ROUTER_PORT:-8988}
+      ROUTER_AUTHENTICATION: ${ROUTER_AUTHENTICATION:-True}
+      ROUTER_ADMIN_USERNAME: ${ROUTER_ADMIN_USERNAME:-radmin}
+      ROUTER_ADMIN_PASSWORD: ${ROUTER_ADMIN_PASSWORD:-82a606ca5a0deea2b5777756788af5c8}
+      ROUTER_LOG_FILE: ${ROUTER_LOG_FILE:-stdout}
+      ROUTER_LOG_LEVEL: ${ROUTER_LOG_LEVEL:-WARNING}
+      ROUTER_LOG_ROTATE: ${ROUTER_LOG_ROTATE:-midnight}
+      ROUTER_LOG_FORMAT: ${ROUTER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      ROUTER_LOG_DATE_FORMAT: ${ROUTER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      ROUTER_PICKLE_PROTOCOL: ${ROUTER_PICKLE_PROTOCOL:-2}
+
+      REDIS_CLIENT_HOST: ${REDIS_CLIENT_HOST:-redis}
+      REDIS_CLIENT_PORT: ${REDIS_CLIENT_PORT:-6379}
+      REDIS_CLIENT_DBID: ${REDIS_CLIENT_DBID:-0}
+      REDIS_CLIENT_POOLSIZE: ${REDIS_CLIENT_POOLSIZE:-10}
+      REDIS_CLIENT_LOG_FILE: ${REDIS_CLIENT_LOG_FILE:-stdout}
+      REDIS_CLIENT_LOG_LEVEL: ${REDIS_CLIENT_LOG_LEVEL:-WARNING}
+      REDIS_CLIENT_LOG_ROTATE: ${REDIS_CLIENT_LOG_ROTATE:-midnight}
+      REDIS_CLIENT_LOG_FORMAT: ${REDIS_CLIENT_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      REDIS_CLIENT_LOG_DATE_FORMAT: ${REDIS_CLIENT_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      JCLI_BIND: ${JCLI_BIND:-0.0.0.0}
+      JCLI_PORT: ${JCLI_PORT:-8990}
+      JCLI_AUTHENTICATION: ${JCLI_AUTHENTICATION:-True}
+      JCLI_ADMIN_USERNAME: ${JCLI_ADMIN_USERNAME:-jcliadmin}
+      JCLI_ADMIN_PASSWORD: ${JCLI_ADMIN_PASSWORD:-79e9b0aa3f3e7c53e916f7ac47439bcb}
+      JCLI_USERNAME: ${JCLI_USERNAME:-jcliadmin}
+      JCLI_PASSWORD: ${JCLI_PASSWORD:-jclipwd}
+      JCLI_LOG_FILE: ${JCLI_LOG_FILE:-stdout}
+      JCLI_LOG_LEVEL: ${JCLI_LOG_LEVEL:-WARNING}
+      JCLI_LOG_ROTATE: ${JCLI_LOG_ROTATE:-midnight}
+      JCLI_LOG_FORMAT: ${JCLI_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      JCLI_LOG_DATE_FORMAT: ${JCLI_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      INTERCEPTOR_CLIENT_HOST: ${INTERCEPTOR_CLIENT_HOST:-interceptord}
+      INTERCEPTOR_CLIENT_PORT: ${INTERCEPTOR_CLIENT_PORT:-8987}
+      INTERCEPTOR_CLIENT_USERNAME: ${INTERCEPTOR_CLIENT_USERNAME:-iadmin}
+      INTERCEPTOR_CLIENT_PASSWORD: ${INTERCEPTOR_CLIENT_PASSWORD:-ipwd}
+
+  dlrd:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${DLRD_HOST:-dlrd}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      jasmind:
+        condition: service_started
+    environment:
+      Daemon: dlrd
+      DLR_THROWER_HTTP_TIMEOUT: ${DLR_THROWER_HTTP_TIMEOUT:-30}
+      DLR_THROWER_RETRY_DELAY: ${DLR_THROWER_RETRY_DELAY:-30}
+      DLR_THROWER_MAX_RETRIES: ${DLR_THROWER_MAX_RETRIES:-3}
+      DLR_THROWER_DLR_PDU: ${DLR_THROWER_DLR_PDU:-deliver_sm}
+      DLR_THROWER_LOG_FILE: ${DLR_THROWER_LOG_FILE:-stdout}
+      DLR_THROWER_LOG_LEVEL: ${DLR_THROWER_LOG_LEVEL:-WARNING}
+      DLR_THROWER_LOG_ROTATE: ${DLR_THROWER_LOG_ROTATE:-midnight}
+      DLR_THROWER_LOG_FORMAT: ${DLR_THROWER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      DLR_THROWER_LOG_DATE_FORMAT: ${DLR_THROWER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      SMPP_SERVER_PB_CLIENT_HOST: ${SMPP_SERVER_PB_CLIENT_HOST:-jasmind}
+      SMPP_SERVER_PB_CLIENT_PORT: ${SMPP_SERVER_PB_CLIENT_PORT:-14000}
+      SMPP_SERVER_PB_CLIENT_USERNAME: ${SMPP_SERVER_PB_CLIENT_USERNAME:-smppsadmin}
+      SMPP_SERVER_PB_CLIENT_PASSWORD: ${SMPP_SERVER_PB_CLIENT_PASSWORD:-smppspwd}
+
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_SPEC: ${AMQP_BROKER_SPEC:-/etc/jasmin/resource/amqp0-9-1.xml}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_HEARTBEAT: ${AMQP_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_LOG_FILE: ${AMQP_BROKER_LOG_FILE:-stdout}
+      AMQP_BROKER_LOG_LEVEL: ${AMQP_BROKER_LOG_LEVEL:-WARNING}
+      AMQP_BROKER_LOG_ROTATE: ${AMQP_BROKER_LOG_ROTATE:-midnight}
+      AMQP_BROKER_LOG_FORMAT: ${AMQP_BROKER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      AMQP_BROKER_LOG_DATE_FORMAT: ${AMQP_BROKER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY:-True}
+      AMQP_BROKER_CONNECTION_FAILURE_RETRY: ${AMQP_BROKER_CONNECTION_FAILURE_RETRY:-True}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY:-10}
+      AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY:-10}
+
+  dlrlookupd:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${DLRLOOKUPD_HOST:-dlrlookupd}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      jasmind:
+        condition: service_started
+    environment:
+      Daemon: dlrlookupd
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_SPEC: ${AMQP_BROKER_SPEC:-/etc/jasmin/resource/amqp0-9-1.xml}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_HEARTBEAT: ${AMQP_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_LOG_FILE: ${AMQP_BROKER_LOG_FILE:-stdout}
+      AMQP_BROKER_LOG_LEVEL: ${AMQP_BROKER_LOG_LEVEL:-WARNING}
+      AMQP_BROKER_LOG_ROTATE: ${AMQP_BROKER_LOG_ROTATE:-midnight}
+      AMQP_BROKER_LOG_FORMAT: ${AMQP_BROKER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      AMQP_BROKER_LOG_DATE_FORMAT: ${AMQP_BROKER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY:-True}
+      AMQP_BROKER_CONNECTION_FAILURE_RETRY: ${AMQP_BROKER_CONNECTION_FAILURE_RETRY:-True}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY:-10}
+      AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY:-10}
+
+      REDIS_CLIENT_HOST: ${REDIS_CLIENT_HOST:-redis}
+      REDIS_CLIENT_PORT: ${REDIS_CLIENT_PORT:-6379}
+      REDIS_CLIENT_DBID: ${REDIS_CLIENT_DBID:-0}
+      REDIS_CLIENT_POOLSIZE: ${REDIS_CLIENT_POOLSIZE:-10}
+      REDIS_CLIENT_LOG_FILE: ${REDIS_CLIENT_LOG_FILE:-stdout}
+      REDIS_CLIENT_LOG_LEVEL: ${REDIS_CLIENT_LOG_LEVEL:-WARNING}
+      REDIS_CLIENT_LOG_ROTATE: ${REDIS_CLIENT_LOG_ROTATE:-midnight}
+      REDIS_CLIENT_LOG_FORMAT: ${REDIS_CLIENT_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      REDIS_CLIENT_LOG_DATE_FORMAT: ${REDIS_CLIENT_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      DLR_PID: ${DLR_PID:-dlrlookupd-01}
+      DLR_DLR_LOOKUP_RETRY_DELAY: ${DLR_DLR_LOOKUP_RETRY_DELAY:-10}
+      DLR_DLR_LOOKUP_MAX_RETRIES: ${DLR_DLR_LOOKUP_MAX_RETRIES:-2}
+      DLR_SMPP_RECEIPT_ON_SUCCESS_SUBMIT_SM_RESP: ${DLR_SMPP_RECEIPT_ON_SUCCESS_SUBMIT_SM_RESP:-False}
+      DLR_LOG_FILE: ${DLR_LOG_FILE:-stdout}
+      DLR_LOG_LEVEL: ${DLR_LOG_LEVEL:-WARNING}
+      DLR_LOG_ROTATE: ${DLR_LOG_ROTATE:-midnight}
+      DLR_LOG_FORMAT: ${DLR_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      DLR_LOG_DATE_FORMAT: ${DLR_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      DLR_LOG_PRIVACY: ${DLR_LOG_PRIVACY:-False}
+
+  deliversmd:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${DELIVERSMD_HOST:-deliversmd}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      jasmind:
+        condition: service_started
+    environment:
+      Daemon: deliversmd
+      DELIVERSM_THROWER_HTTP_TIMEOUT: ${DELIVERSM_THROWER_HTTP_TIMEOUT:-30}
+      DELIVERSM_THROWER_RETRY_DELAY: ${DELIVERSM_THROWER_RETRY_DELAY:-30}
+      DELIVERSM_THROWER_MAX_RETRIES: ${DELIVERSM_THROWER_MAX_RETRIES:-3}
+      DELIVERSM_THROWER_LOG_FILE: ${DELIVERSM_THROWER_LOG_FILE:-stdout}
+      DELIVERSM_THROWER_LOG_LEVEL: ${DELIVERSM_THROWER_LOG_LEVEL:-WARNING}
+      DELIVERSM_THROWER_LOG_ROTATE: ${DELIVERSM_THROWER_LOG_ROTATE:-midnight}
+      DELIVERSM_THROWER_LOG_FORMAT: ${DELIVERSM_THROWER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      DELIVERSM_THROWER_LOG_DATE_FORMAT: ${DELIVERSM_THROWER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      SMPP_SERVER_PB_CLIENT_HOST: ${SMPP_SERVER_PB_CLIENT_HOST:-jasmind}
+      SMPP_SERVER_PB_CLIENT_PORT: ${SMPP_SERVER_PB_CLIENT_PORT:-14000}
+      SMPP_SERVER_PB_CLIENT_USERNAME: ${SMPP_SERVER_PB_CLIENT_USERNAME:-smppsadmin}
+      SMPP_SERVER_PB_CLIENT_PASSWORD: ${SMPP_SERVER_PB_CLIENT_PASSWORD:-smppspwd}
+
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_SPEC: ${AMQP_BROKER_SPEC:-/etc/jasmin/resource/amqp0-9-1.xml}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_HEARTBEAT: ${AMQP_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_LOG_FILE: ${AMQP_BROKER_LOG_FILE:-stdout}
+      AMQP_BROKER_LOG_LEVEL: ${AMQP_BROKER_LOG_LEVEL:-WARNING}
+      AMQP_BROKER_LOG_ROTATE: ${AMQP_BROKER_LOG_ROTATE:-midnight}
+      AMQP_BROKER_LOG_FORMAT: ${AMQP_BROKER_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      AMQP_BROKER_LOG_DATE_FORMAT: ${AMQP_BROKER_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY:-True}
+      AMQP_BROKER_CONNECTION_FAILURE_RETRY: ${AMQP_BROKER_CONNECTION_FAILURE_RETRY:-True}
+      AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_RETRY_DELAY:-10}
+      AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY: ${AMQP_BROKER_CONNECTION_LOSS_FAILURE_DELAY:-10}
+
+  interceptord:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${INTERCEPTORD_HOST:-interceptord}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      jasmind:
+        condition: service_started
+    environment:
+      Daemon: interceptord
+      INTERCEPTOR_BIND: ${INTERCEPTOR_BIND:-0.0.0.0}
+      INTERCEPTOR_PORT: ${INTERCEPTOR_PORT:-8987}
+      INTERCEPTOR_AUTHENTICATION: ${INTERCEPTOR_AUTHENTICATION:-True}
+      INTERCEPTOR_ADMIN_USERNAME: ${INTERCEPTOR_ADMIN_USERNAME:-iadmin}
+      INTERCEPTOR_ADMIN_PASSWORD: ${INTERCEPTOR_ADMIN_PASSWORD:-dd8b84cdb60655fed3b9b2d668c5bd9e}
+      INTERCEPTOR_LOG_FILE: ${INTERCEPTOR_LOG_FILE:-stdout}
+      INTERCEPTOR_LOG_SLOW_SCRIPT: ${INTERCEPTOR_LOG_SLOW_SCRIPT:-1}
+      INTERCEPTOR_LOG_LEVEL: ${INTERCEPTOR_LOG_LEVEL:-WARNING}
+      INTERCEPTOR_LOG_ROTATE: ${INTERCEPTOR_LOG_ROTATE:-midnight}
+      INTERCEPTOR_LOG_FORMAT: ${INTERCEPTOR_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      INTERCEPTOR_LOG_DATE_FORMAT: ${INTERCEPTOR_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+  restapi:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${RESTAPI_HOST:-restapi}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - '${FORWARD_JASMIN_RESTAPI_PORT:-8080}:8080'
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      jasmind:
+        condition: service_started
+    environment:
+      Daemon: restapi
+      REST_API_HTTP_API_HOST: ${REST_API_HTTP_API_HOST:-jasmind}
+      REST_API_HTTP_API_PORT: ${REST_API_HTTP_API_PORT:-1401}
+      REST_API_SHOW_JASMIN_VERSION: ${REST_API_SHOW_JASMIN_VERSION:-True}
+      REST_API_AUTH_CACHE_SECONDS: ${REST_API_AUTH_CACHE_SECONDS:-10}
+      REST_API_AUTH_CACHE_MAX_KEYS: ${REST_API_AUTH_CACHE_MAX_KEYS:-500}
+      REST_API_HTTP_THROUGHPUT_PER_WORKER: ${REST_API_HTTP_THROUGHPUT_PER_WORKER:-8}
+      REST_API_SMART_QOS: ${REST_API_SMART_QOS:-True}
+      REST_API_LOG_FILE: ${REST_API_LOG_FILE:-stdout}
+      REST_API_LOG_LEVEL: ${REST_API_LOG_LEVEL:-WARNING}
+      REST_API_LOG_ROTATE: ${REST_API_LOG_ROTATE:-midnight}
+      REST_API_LOG_FORMAT: ${REST_API_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      REST_API_LOG_DATE_FORMAT: ${REST_API_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      CELERY_TIMEZONE: ${CELERY_TIMEZONE:-UTC}
+      CELERY_ENABLE_UTC: ${CELERY_ENABLE_UTC:-True}
+      CELERY_ACCEPT_CONTENT: ${CELERY_ACCEPT_CONTENT:-json}
+      CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-WARNING}
+
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_BROKER_HEARTBEAT: ${AMQP_BROKER_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_BROKER_HEARTBEAT_CHECKRATE: ${AMQP_BROKER_BROKER_HEARTBEAT_CHECKRATE:-2}
+      AMQP_BROKER_BROKER_CONNECTION_TIMEOUT: ${AMQP_BROKER_BROKER_CONNECTION_TIMEOUT:-10}
+      AMQP_BROKER_BROKER_CONNECTION_RETRY: ${AMQP_BROKER_BROKER_CONNECTION_RETRY:-True}
+      AMQP_BROKER_BROKER_CONNECTION_STARTUP_RETRY: ${AMQP_BROKER_BROKER_CONNECTION_STARTUP_RETRY:-True}
+      AMQP_BROKER_BROKER_CONNECTION_MAX_RETRIES: ${AMQP_BROKER_BROKER_CONNECTION_MAX_RETRIES:-100}
+      AMQP_BROKER_TASK_SERIALIZER: ${AMQP_BROKER_TASK_SERIALIZER:-json}
+
+      REDIS_CLIENT_HOST: ${REDIS_CLIENT_HOST:-redis}
+      REDIS_CLIENT_PORT: ${REDIS_CLIENT_PORT:-6379}
+      REDIS_CLIENT_RESULT_DBID: ${REDIS_CLIENT_RESULT_DBID:-1}
+      REDIS_CLIENT_REDIS_SOCKET_TIMEOUT: ${REDIS_CLIENT_REDIS_SOCKET_TIMEOUT:-120}
+      REDIS_CLIENT_RESULT_EXPIRES: ${REDIS_CLIENT_RESULT_EXPIRES:-86400}
+      REDIS_CLIENT_RESULT_SERIALIZER: ${REDIS_CLIENT_RESULT_SERIALIZER:-json}
+
+  celery:
+    build:
+      context: ./
+      dockerfile: ./docker/Dockerfile.modular
+    image: jasmin:modular
+    restart: unless-stopped
+    hostname: '${CELERY_HOST:-celery}'
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - jasmin-config:/etc/jasmin
+      - jasmin-store:/etc/jasmin/store
+      - jasmin-logs:/var/log/jasmin
+    networks:
+      - jasmin-network
+    depends_on:
+      restapi:
+        condition: service_started
+    environment:
+      Daemon: celery
+      REST_API_HTTP_API_HOST: ${REST_API_HTTP_API_HOST:-jasmind}
+      REST_API_HTTP_API_PORT: ${REST_API_HTTP_API_PORT:-1401}
+      REST_API_SHOW_JASMIN_VERSION: ${REST_API_SHOW_JASMIN_VERSION:-True}
+      REST_API_AUTH_CACHE_SECONDS: ${REST_API_AUTH_CACHE_SECONDS:-10}
+      REST_API_AUTH_CACHE_MAX_KEYS: ${REST_API_AUTH_CACHE_MAX_KEYS:-500}
+      REST_API_HTTP_THROUGHPUT_PER_WORKER: ${REST_API_HTTP_THROUGHPUT_PER_WORKER:-8}
+      REST_API_SMART_QOS: ${REST_API_SMART_QOS:-True}
+      REST_API_LOG_FILE: ${REST_API_LOG_FILE:-stdout}
+      REST_API_LOG_LEVEL: ${REST_API_LOG_LEVEL:-WARNING}
+      REST_API_LOG_ROTATE: ${REST_API_LOG_ROTATE:-midnight}
+      REST_API_LOG_FORMAT: ${REST_API_LOG_FORMAT:-'%(asctime)s %(levelname)-8s %(process)d %(message)s'}
+      REST_API_LOG_DATE_FORMAT: ${REST_API_LOG_DATE_FORMAT:-'%Y-%m-%d %H:%M:%S'}
+
+      CELERY_MAX_AUTOSCALE: ${CELERY_MAX_AUTOSCALE:-10}
+      CELERY_MIN_AUTOSCALE: ${CELERY_MIN_AUTOSCALE:-3}
+      CELERY_TIMEZONE: ${CELERY_TIMEZONE:-UTC}
+      CELERY_ENABLE_UTC: ${CELERY_ENABLE_UTC:-True}
+      CELERY_ACCEPT_CONTENT: ${CELERY_ACCEPT_CONTENT:-json}
+      CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-WARNING}
+
+      AMQP_BROKER_HOST: ${AMQP_BROKER_HOST:-rabbit-mq}
+      AMQP_BROKER_VHOST: ${AMQP_BROKER_VHOST:-/}
+      AMQP_BROKER_PORT: ${AMQP_BROKER_PORT:-5672}
+      AMQP_BROKER_USERNAME: ${AMQP_BROKER_USERNAME:-guest}
+      AMQP_BROKER_PASSWORD: ${AMQP_BROKER_PASSWORD:-guest}
+      AMQP_BROKER_BROKER_HEARTBEAT: ${AMQP_BROKER_BROKER_HEARTBEAT:-0}
+      AMQP_BROKER_BROKER_HEARTBEAT_CHECKRATE: ${AMQP_BROKER_BROKER_HEARTBEAT_CHECKRATE:-2}
+      AMQP_BROKER_BROKER_CONNECTION_TIMEOUT: ${AMQP_BROKER_BROKER_CONNECTION_TIMEOUT:-10}
+      AMQP_BROKER_BROKER_CONNECTION_RETRY: ${AMQP_BROKER_BROKER_CONNECTION_RETRY:-True}
+      AMQP_BROKER_BROKER_CONNECTION_STARTUP_RETRY: ${AMQP_BROKER_BROKER_CONNECTION_STARTUP_RETRY:-True}
+      AMQP_BROKER_BROKER_CONNECTION_MAX_RETRIES: ${AMQP_BROKER_BROKER_CONNECTION_MAX_RETRIES:-100}
+      AMQP_BROKER_TASK_SERIALIZER: ${AMQP_BROKER_TASK_SERIALIZER:-json}
+
+      REDIS_CLIENT_HOST: ${REDIS_CLIENT_HOST:-redis}
+      REDIS_CLIENT_PORT: ${REDIS_CLIENT_PORT:-6379}
+      REDIS_CLIENT_RESULT_DBID: ${REDIS_CLIENT_RESULT_DBID:-1}
+      REDIS_CLIENT_REDIS_SOCKET_TIMEOUT: ${REDIS_CLIENT_REDIS_SOCKET_TIMEOUT:-120}
+      REDIS_CLIENT_RESULT_EXPIRES: ${REDIS_CLIENT_RESULT_EXPIRES:-86400}
+      REDIS_CLIENT_RESULT_SERIALIZER: ${REDIS_CLIENT_RESULT_SERIALIZER:-json}
+
+networks:
+  jasmin-network:
+    driver: bridge
+volumes:
+  jasmin-config: {}
+  jasmin-store: {}
+  jasmin-logs: {}
+  rabbitmq: {}
+  redis: {}
