@@ -3,7 +3,8 @@
 import os
 import signal
 import sys
-import syslog
+import traceback
+import logging
 import ntpath
 
 from lockfile import FileLock, LockTimeout, AlreadyLocked
@@ -21,6 +22,7 @@ from jasmin.bin import BaseDaemon
 
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
 
+LOG_CATEGORY = "jasmin-dlrlookup-daemon"
 
 class Options(usage.Options):
     optParameters = [
@@ -35,10 +37,26 @@ class Options(usage.Options):
 
 
 class DlrlookupDaemon(BaseDaemon):
+    def __init__(self, opt):
+        super(DlrlookupDaemon, self).__init__(opt)
+
+        self.log = logging.getLogger(LOG_CATEGORY)
+        self.log.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(process)d %(message)s', '%Y-%m-%d %H:%M:%S')
+        handler.setFormatter(formatter)
+        self.log.addHandler(handler)
+        self.log.propagate = False
+
     @defer.inlineCallbacks
     def startRedisClient(self):
-        """Start AMQP Broker"""
+        """Start Redis Client"""
         RedisForJasminConfigInstance = RedisForJasminConfig(self.options['config'])
+
+        # This is a separate process: do not log to same log_file as Jasmin Daemon
+        # Refs #629
+        RedisForJasminConfigInstance.log_file = '%s/dlrlookupd-%s' % ntpath.split(RedisForJasminConfigInstance.log_file)
+
         self.components['rc'] = yield ConnectionWithConfiguration(RedisForJasminConfigInstance)
         # Authenticate and select db
         if RedisForJasminConfigInstance.password is not None:
@@ -53,6 +71,10 @@ class DlrlookupDaemon(BaseDaemon):
         """Start AMQP Broker"""
 
         AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
+        
+        # This is a separate process: do not log to same log_file as Jasmin Daemon
+        AMQPServiceConfigInstance.log_file = '%s/dlrlookupd-%s' % ntpath.split(AMQPServiceConfigInstance.log_file)
+
         self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
         self.components['amqp-broker-factory'].preConnect()
 
@@ -83,57 +105,83 @@ class DlrlookupDaemon(BaseDaemon):
 
     @defer.inlineCallbacks
     def start(self):
-        """Start Dlrlookupd daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Starting Dlrlookup Daemon ...")
+        """Start DLRLookup Daemon"""
+        self.log.info("Starting DLRLookup Daemon ...")
 
         ########################################################
         # Connect to redis server
         try:
             yield self.startRedisClient()
-        except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start RedisClient: %s" % e)
-        else:
-            syslog.syslog(syslog.LOG_INFO, "  RedisClient Started.")
+            self.log.info("  RedisClient Started.")
 
-        ########################################################
-        # Start AMQP Broker
-        try:
-            yield self.startAMQPBrokerService()
-            yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
-        except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start AMQP Broker: %s" % e)
-        else:
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker Started.")
+            ########################################################
+            # Start AMQP Broker
+            try:
+                yield self.startAMQPBrokerService()
+                yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
+                self.log.info("  AMQP Broker Started.")
+            
+                ########################################################
+                # register services stop on channelDown
+                self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
+                    
+                ########################################################
+                # Start DLRLookup
+                try:
+                    self.startDLRLookupService()
+                    self.log.info("  DLRLookup Started.")
 
-        try:
-            # [optional] Start DLR Lookup
-            self.startDLRLookupService()
+                except Exception as e:
+                    self.log.error("  Cannot start DLRLookup: %s\n%s" % (e, traceback.format_exc()))
+            except Exception as e:
+                self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start DLRLookup: %s" % e)
+            self.log.error("  Cannot start RedisClient: %s\n%s" % (e, traceback.format_exc()))
+
+    def AMQPDownHandler(self, ignore=None):
+        """Handle AMQP Broker disconnection"""
+        self.log.error("AMQP Broker disconnected, pausing DLRLookupd services ...")
+        if self.components['amqp-broker-factory'].connected is True:
+            return self.refreshServices()
+
+        if self.components['amqp-broker-factory'].connectionRetry:
+            self.components['amqp-broker-factory'].getChannelReadyDeferred().addCallback(self.refreshServices).addErrback(self.stop)
         else:
-            syslog.syslog(syslog.LOG_INFO, "  DLRLookup Started.")
+            self.stop()
 
     @defer.inlineCallbacks
-    def stop(self):
-        """Stop Dlrlookup daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Stopping Dlrlookup Daemon ...")
+    def refreshServices(self, ignore=None):
+        """Refresh DLRLookupd services"""
+        self.log.info("Refreshing DLRLookupd services ...")
 
-        if 'amqp-broker-client' in self.components:
-            yield self.stopAMQPBrokerService()
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker disconnected.")
+        self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
+        try:
+            self.startDLRLookupService()
+        except Exception as e:
+            self.log.error("  Cannot refresh DLRLookup: %s\n%s" % (e, traceback.format_exc()))
+        else:
+            self.log.info("  DLRLookup Refreshed.")
+
+    @defer.inlineCallbacks
+    def stop(self, ignore=None):
+        """Stop DLRLookupd daemon"""
+        self.log.info("Stopping DLRLookupd Daemon ...")
 
         if 'rc' in self.components:
             yield self.stopRedisClient()
-            syslog.syslog(syslog.LOG_INFO, "  RedisClient stopped.")
+            self.log.info("  RedisClient disconnected.")
 
+        if 'amqp-broker-client' in self.components:
+            yield self.stopAMQPBrokerService()
+            self.log.info("  AMQP Broker disconnected.")
+            
         reactor.stop()
 
     def sighandler_stop(self, signum, frame):
         """Handle stop signal cleanly"""
-        syslog.syslog(syslog.LOG_INFO, "Received signal to stop Jasmin DlrlookupDaemon")
+        self.log.info("Received signal to stop Jasmin Dlrlookup Daemon")
 
         return self.stop()
-
 
 if __name__ == '__main__':
     lock = None
