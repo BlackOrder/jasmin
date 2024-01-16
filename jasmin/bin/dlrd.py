@@ -3,7 +3,9 @@
 import os
 import signal
 import sys
-import syslog
+import traceback
+import logging
+import ntpath
 
 from lockfile import FileLock, LockTimeout, AlreadyLocked
 from twisted.internet import reactor, defer
@@ -20,6 +22,8 @@ from jasmin.bin import BaseDaemon
 
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
 
+LOG_CATEGORY = "Dlr-daemon"
+
 
 class Options(usage.Options):
     optParameters = [
@@ -34,10 +38,25 @@ class Options(usage.Options):
 
 
 class DlrDaemon(BaseDaemon):
+    def __init__(self, opt):
+        super(DlrDaemon, self).__init__(opt)
+
+        self.log = logging.getLogger(LOG_CATEGORY)
+        self.log.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(process)d %(message)s', '%Y-%m-%d %H:%M:%S')
+        handler.setFormatter(formatter)
+        self.log.addHandler(handler)
+        self.log.propagate = False
+
     def startAMQPBrokerService(self):
         """Start AMQP Broker"""
 
         AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
+        
+        # This is a separate process: do not log to same log_file as Jasmin Daemon
+        AMQPServiceConfigInstance.log_file = '%s/dlrd-%s' % ntpath.split(AMQPServiceConfigInstance.log_file)
+
         self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
         self.components['amqp-broker-factory'].preConnect()
 
@@ -65,16 +84,21 @@ class DlrDaemon(BaseDaemon):
             SMPPServerPBClientConfigInstance.password,
             retry=True)
 
+    @defer.inlineCallbacks
     def stopSMPPServerPBClient(self):
         """Stop SMPPServerPB client"""
 
         if self.components['smpps-pb-client'].isConnected:
-            return self.components['smpps-pb-client'].disconnect()
+            yield self.components['smpps-pb-client'].disconnect()
 
     def startDLRThrowerService(self):
         """Start DLRThrower"""
 
         DLRThrowerConfigInstance = DLRThrowerConfig(self.options['config'])
+        
+        # This is a separate process: do not log to same log_file as Jasmin sm-listener
+        DLRThrowerConfigInstance.log_file = '%s/dlrd-%s' % ntpath.split(DLRThrowerConfigInstance.log_file)
+
         self.components['dlr-thrower'] = DLRThrower(DLRThrowerConfigInstance)
         self.components['dlr-thrower'].addSmpps(self.components['smpps-pb-client'])
 
@@ -86,62 +110,91 @@ class DlrDaemon(BaseDaemon):
         return self.components['dlr-thrower'].stopService()
 
     @defer.inlineCallbacks
-    def start(self):
-        """Start Dlrd daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Starting Dlr Daemon ...")
+    def startDaemon(self):
+        """Start Dlr Daemon"""
+        self.log.info("Starting Dlr Daemon ...")
 
         ########################################################
         # Start AMQP Broker
         try:
-            self.startAMQPBrokerService()
+            yield self.startAMQPBrokerService()
             yield self.components['amqp-broker-factory'].getChannelReadyDeferred()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start AMQP Broker: %s" % e)
+            self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
         else:
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker Started.")
+            self.log.info("  AMQP Broker Started.")
 
         ########################################################
         try:
             # Start SMPPServerPB Client
             yield self.startSMPPServerPBClient()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start SMPPServerPBClient: %s" % e)
+            self.log.error("  Cannot start SMPPServerPBClient: %s\n%s" % (e, traceback.format_exc()))
         else:
-            syslog.syslog(syslog.LOG_INFO, "  SMPPServerPBClientStarted.")
+            self.log.info("  SMPPServerPBClient Started.")
+        
+        ########################################################
+        # register services stop on channelDown
+        self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
 
         ########################################################
         try:
             # Start DLRThrower
             yield self.startDLRThrowerService()
         except Exception as e:
-            syslog.syslog(syslog.LOG_ERR, "  Cannot start DLRThrower: %s" % e)
+            self.log.error("  Cannot start DLRThrower: %s\n%s" % (e, traceback.format_exc()))
         else:
-            syslog.syslog(syslog.LOG_INFO, "  DLRThrower Started.")
+            self.log.info("  DLRThrower Started.")
+
+
+    def AMQPDownHandler(self, ignore):
+        """Handle AMQP Broker disconnection"""
+        self.log.error("AMQP Broker disconnected, pausing Dlrd services ...")
+        self.components['amqp-broker-factory'].getChannelReadyDeferred().addCallback(self.refreshServices)
 
     @defer.inlineCallbacks
-    def stop(self):
-        """Stop Dlrd daemon"""
-        syslog.syslog(syslog.LOG_INFO, "Stopping Dlr Daemon ...")
+    def refreshServices(self, ignore):
+        """Refresh Dlrd services"""
+        self.log.info("Unpausing Dlrd services ...")
+
+        self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
+
+        ########################################################
+        try:
+            # refresh DLRThrower
+            if 'dlr-thrower' in self.components:
+                yield self.stopDLRThrowerService()
+            yield self.startDLRThrowerService()
+        except Exception as e:
+            self.log.error("  Cannot refresh DLRThrower: %s\n%s" % (e, traceback.format_exc()))
+        else:
+            self.log.info("  DLRThrower Refreshed.")
+
+    @defer.inlineCallbacks
+    def stopDaemons(self):
+        """Stop Dlr daemon"""
+        self.log.info("Stopping Dlr Daemon ...")
 
         if 'smpps-pb-client' in self.components:
             yield self.stopSMPPServerPBClient()
-            syslog.syslog(syslog.LOG_INFO, "  SMPPServerPBClient stopped.")
+            self.log.info("  SMPPServerPBClient Started.")
 
         if 'dlr-thrower' in self.components:
             yield self.stopDLRThrowerService()
-            syslog.syslog(syslog.LOG_INFO, "  DLRThrower stopped.")
+            self.log.info("  DLRThrower stopped.")
 
         if 'amqp-broker-client' in self.components:
             yield self.stopAMQPBrokerService()
-            syslog.syslog(syslog.LOG_INFO, "  AMQP Broker disconnected.")
-
+            self.log.info("  AMQP Broker disconnected.")
+        
         reactor.stop()
+            
 
     def sighandler_stop(self, signum, frame):
         """Handle stop signal cleanly"""
-        syslog.syslog(syslog.LOG_INFO, "Received signal to stop Dlr Daemon")
+        self.log.info("Received signal to stop Dlr Daemon")
 
-        return self.stop()
+        return self.stopDaemons()
 
 
 if __name__ == '__main__':
@@ -162,7 +215,7 @@ if __name__ == '__main__':
         signal.signal(signal.SIGINT, dlr_d.sighandler_stop)
         signal.signal(signal.SIGTERM, dlr_d.sighandler_stop)
         # Start DlrDaemon
-        dlr_d.start()
+        dlr_d.startDaemon()
 
         reactor.run()
     except usage.UsageError as errortext:
