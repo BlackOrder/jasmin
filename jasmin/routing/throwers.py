@@ -98,20 +98,20 @@ class Thrower(Service):
         self.log.info('Added a %s access to SMPPServerFactory', self.smpps_access)
 
     def getThrowingRetrials(self, message):
-        return self.throwing_retrials.get(self.getMessageUniqueId(message=message), 0)
+        return self.throwing_retrials.get(message.content.properties['message-id'], 0)
 
     def delThrowingRetrials(self, message):
-        if self.getMessageUniqueId(message=message) in self.throwing_retrials:
-            del self.throwing_retrials[self.getMessageUniqueId(message=message)]
+        if message.content.properties['message-id'] in self.throwing_retrials:
+            del self.throwing_retrials[message.content.properties['message-id']]
             return True
         else:
             return False
 
     def incThrowingRetrials(self, message):
-        if self.getMessageUniqueId(message=message) in self.throwing_retrials:
-            self.throwing_retrials[self.getMessageUniqueId(message=message)] += 1
+        if message.content.properties['message-id'] in self.throwing_retrials:
+            self.throwing_retrials[message.content.properties['message-id']] += 1
         else:
-            self.throwing_retrials[self.getMessageUniqueId(message=message)] = 1
+            self.throwing_retrials[message.content.properties['message-id']] = 1
 
     def throwing_callback(self, message):
         # Init retrial mechanism
@@ -194,9 +194,9 @@ class Thrower(Service):
                                       requeue=1)
 
             # If any, clear timer before setting a new one
-            self.clearRequeueTimer(self.getMessageUniqueId(message=message))
+            self.clearRequeueTimer(msgid)
 
-            self.requeueTimers[self.getMessageUniqueId(message=message)] = timer
+            self.requeueTimers[msgid] = timer
             defer.returnValue(timer)
         else:
             self.log.debug("Requeuing Content[%s] without delay", msgid)
@@ -216,12 +216,6 @@ class Thrower(Service):
         self.delThrowingRetrials(message)
 
         yield self.amqpBroker.chan.basic_ack(message.delivery_tag)
-    
-    def getMessageUniqueId(self, message):
-        uniqueId = message.content.properties['message-id']
-        if 'headers' in message.content.properties and 'level' in message.content.properties['headers']:
-            uniqueId += '-%s' % message.content.properties['headers']['level']
-        return uniqueId
 
 
 class deliverSmThrower(Thrower):
@@ -246,7 +240,7 @@ class deliverSmThrower(Thrower):
         self.log.debug('Got one message (msgid:%s) to throw: %s', msgid, RoutedDeliverSmContent)
 
         # If any, clear requeuing timer
-        self.clearRequeueTimer(self.getMessageUniqueId(message=message))
+        self.clearRequeueTimer(msgid)
 
         if dcs[0]._type != 'http':
             self.log.error(
@@ -398,7 +392,7 @@ class deliverSmThrower(Thrower):
         self.log.debug('Got one message (msgid:%s) to throw: %s', msgid, RoutedDeliverSmContent)
 
         # If any, clear requeuing timer
-        self.clearRequeueTimer(self.getMessageUniqueId(message=message))
+        self.clearRequeueTimer(msgid)
 
         if dcs[0]._type != 'smpps':
             self.log.error(
@@ -530,7 +524,7 @@ class DLRThrower(Thrower):
         self.log.debug('Got one message (msgid:%s) to throw', msgid)
 
         # If any, clear requeuing timer
-        self.clearRequeueTimer(self.getMessageUniqueId(message=message))
+        self.clearRequeueTimer(msgid)
 
         # Build mandatory arguments
         args = {
@@ -627,7 +621,7 @@ class DLRThrower(Thrower):
             err = err.encode('ascii')
 
         # If any, clear requeuing timer
-        self.clearRequeueTimer(self.getMessageUniqueId(message=message))
+        self.clearRequeueTimer(msgid)
 
         try:
             if self.smpps is None or self.smpps_access is None:
