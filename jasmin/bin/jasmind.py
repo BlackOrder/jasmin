@@ -59,8 +59,7 @@ class Options(usage.Options):
         ['disable-smpp-server', None, 'Do not start SMPP Server service'],
         ['enable-dlr-thrower', None, 'Enable DLR Thrower service (not recommended: start the dlrd daemon instead)'],
         ['enable-dlr-lookup', None, 'Enable DLR Lookup service (not recommended: start the dlrlookupd daemon instead)'],
-        # @TODO: deliver-thrower must be executed as a standalone process, just like dlr-thrower
-        ['disable-deliver-thrower', None, 'Do not start DeliverSm Thrower service'],
+        ['enable-deliver-thrower', None, 'Enable DeliverSm Thrower service (not recommended: start the deliversmd daemon instead)'],
         ['disable-http-api', None, 'Do not start HTTP API'],
         ['disable-jcli', None, 'Do not start jCli console'],
         ['enable-interceptor-client', None, 'Start Interceptor client'],
@@ -115,6 +114,7 @@ class JasminDaemon(BaseDaemon):
         """Start Router PB server"""
 
         RouterPBConfigInstance = RouterPBConfig(self.options['config'])
+        
         self.components['router-pb-factory'] = RouterPB(RouterPBConfigInstance)
 
         # Set authentication portal
@@ -342,7 +342,7 @@ class JasminDaemon(BaseDaemon):
             return self.components['interceptor-pb-client'].disconnect()
 
     @defer.inlineCallbacks
-    def start(self):
+    def startDaemon(self):
         """Start Jasmind daemon"""
         self.log.info("Starting Jasmin Daemon ...")
 
@@ -376,6 +376,11 @@ class JasminDaemon(BaseDaemon):
             self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
         else:
             self.log.info("  AMQP Broker Started.")
+
+        ########################################################
+        # register services stop on channelDown
+        self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
+
 
         ########################################################
         # Start Router PB server
@@ -425,7 +430,7 @@ class JasminDaemon(BaseDaemon):
                 self.log.info("  SMPPServer Started.")
 
         ########################################################
-        if not self.options['disable-deliver-thrower']:
+        if self.options['enable-deliver-thrower']:
             try:
                 # [optional] Start deliverSmThrower
                 yield self.startdeliverSmThrowerService()
@@ -463,9 +468,65 @@ class JasminDaemon(BaseDaemon):
                 self.log.error("  Cannot start jCli: %s\n%s" % (e, traceback.format_exc()))
             else:
                 self.log.info("  jCli Started.")
+        
+    def AMQPDownHandler(self, ignore):
+        self.log.error("AMQP Broker disconnected, Some of Jasmind service are down ...")
+        self.components['amqp-broker-factory'].getChannelReadyDeferred().addCallback(self.refreshServices)
+
 
     @defer.inlineCallbacks
-    def stop(self):
+    def refreshServices(self, ignore):
+        self.log.info("Resuming Jasmind services ...")
+        self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
+
+        ########################################################
+        # refresh Router PB server
+        try:
+            if 'router-pb-server' in self.components and self.components['router-pb-server'].getHost() is not None:
+                yield self.components['router-pb-factory'].addAmqpBroker(self.components['amqp-broker-factory'])
+            else:
+                yield self.startRouterPBService()
+        except Exception as e:
+            self.log.error("  Cannot refresh RouterPB: %s\n%s" % (e, traceback.format_exc()))
+        else:
+            self.log.info("  RouterPB refreshed.")
+
+        ########################################################
+        if self.options['enable-dlr-lookup']:
+            try:
+                # [optional] refresh DLR Lookup
+                yield self.startDLRLookupService()
+            except Exception as e:
+                self.log.error("  Cannot refresh DLRLookup: %s\n%s" % (e, traceback.format_exc()))
+            else:
+                self.log.info("  DLRLookup refreshed.")
+
+        ########################################################
+        if self.options['enable-deliver-thrower']:
+            try:
+                # [optional] refresh deliverSmThrower
+                if 'deliversm-thrower' in self.components:
+                    yield self.stopdeliverSmThrowerService()
+                yield self.startdeliverSmThrowerService()
+            except Exception as e:
+                self.log.error("  Cannot refresh deliverSmThrower: %s\n%s" % (e, traceback.format_exc()))
+            else:
+                self.log.info("  deliverSmThrower refreshed.")
+
+        ########################################################
+        if self.options['enable-dlr-thrower']:
+            try:
+                # [optional] refresh DLRThrower
+                if 'dlr-thrower' in self.components:
+                    yield self.stopDLRThrowerService()
+                yield self.startDLRThrowerService()
+            except Exception as e:
+                self.log.error("  Cannot refresh DLRThrower: %s\n%s" % (e, traceback.format_exc()))
+            else:
+                self.log.info("  DLRThrower refreshed.")
+
+    @defer.inlineCallbacks
+    def stopDaemons(self):
         """Stop Jasmind daemon"""
         self.log.info("Stopping Jasmin Daemon ...")
 
@@ -520,7 +581,7 @@ class JasminDaemon(BaseDaemon):
         """Handle stop signal cleanly"""
         self.log.info("Received signal to stop Jasmin Daemon")
 
-        return self.stop()
+        return self.stopDaemons()
 
 
 if __name__ == '__main__':
@@ -541,7 +602,7 @@ if __name__ == '__main__':
         signal.signal(signal.SIGINT, ja_d.sighandler_stop)
         signal.signal(signal.SIGTERM, ja_d.sighandler_stop)
         # Start JasminDaemon
-        ja_d.start()
+        ja_d.startDaemon()
 
         reactor.run()
     except usage.UsageError as errortext:
