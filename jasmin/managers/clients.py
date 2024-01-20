@@ -73,8 +73,78 @@ class SMPPClientManagerPB(pb.Avatar):
 
     def addAmqpBroker(self, amqpBroker):
         self.amqpBroker = amqpBroker
+        self.amqpBroker.getChannelDownDeferred().addCallback(self.reloadConnectors)
 
         self.log.info('Added amqpBroker to SMPPClientManagerPB')
+    
+    @defer.inlineCallbacks
+    def reloadConnectors(self, ignore):
+        self.log.info('AMQP Broker channel is down')
+        self.log.info('Waiting for AMQP Broker channel to be ready again')
+        if self.amqpBroker.connected is False:
+            if self.amqpBroker.connectionRetry is True:
+                yield self.amqpBroker.getChannelReadyDeferred()
+            else:
+                self.log.critical('AMQP Broker channel is down and connection retry is disabled')
+                defer.returnValue(False)
+
+        self.amqpBroker.getChannelDownDeferred().addCallback(self.reloadConnectors)
+
+        self.log.info('AMQP Broker channel is ready again, reloading connectors consumers')
+        # Reload connectors
+        for connector in self.connectors:
+            if connector['service'].running != 1:
+                continue
+            # Stop the queue consumer
+            if connector['consumer_tag'] is not None:
+                self.log.debug('Stopping submit_sm_q consumer in connector [%s]', connector['id'])
+                yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
+
+                # Cleaning
+                self.log.debug('Cleaning objects in connector [%s]', connector['id'])
+                connector['submit_sm_q'] = None
+                connector['consumer_tag'] = None
+
+            # Start the queue consumer
+            self.log.debug('Starting submit_sm_q consumer in connector [%s]', connector['id'])
+
+            # Subscribe to submit.sm.%cid queue
+            # check jasmin.queues.test.test_amqp.PublishConsumeTestCase.test_simple_publish_consume_by_topic
+            submit_sm_queue = 'submit.sm.%s' % connector['id']
+            consumerTag = 'SMPPClientFactory-%s' % (connector['id'])
+
+            try:
+                # Fix prefetch limit per consumer to 1 to get correct throttling
+                if connector['config'].submit_sm_throughput > 0:
+                    prefetch_count = 1
+                else:
+                    # set prefetch_count to the absolute submit_sm_throughput value. it's negative or zero now
+                    prefetch_count = connector['config'].submit_sm_throughput * -1
+
+                self.log.debug('Setting prefetch_count to %s for connector [%s]', prefetch_count, connector['id'])
+                
+                yield self.amqpBroker.chan.basic_qos(prefetch_count=prefetch_count)
+
+                # Start a new consumer
+                yield self.amqpBroker.chan.basic_consume(queue=submit_sm_queue,
+                                                         no_ack=False, consumer_tag=consumerTag)
+            except Exception as e:
+                self.log.error('Error consuming from queue %s: %s', submit_sm_queue, e)
+                defer.returnValue(False)
+
+            submit_sm_q = yield self.amqpBroker.client.queue(consumerTag)
+            self.log.info('%s is consuming from queue: %s', consumerTag, submit_sm_queue)
+
+            # Set callbacks for every consumed message from submit_sm_queue queue
+            d = submit_sm_q.get()
+            d.addCallback(connector['sm_listener'].submit_sm_callback).addErrback(
+                connector['sm_listener'].submit_sm_errback)
+
+            # Set connector data
+            connector['sm_listener'].setSubmitSmQ(submit_sm_q)
+            connector['consumer_tag'] = consumerTag
+            connector['submit_sm_q'] = submit_sm_q
+        
 
     def addRedisClient(self, redisClient):
         self.redisClient = redisClient
@@ -241,9 +311,6 @@ class SMPPClientManagerPB(pb.Avatar):
             self.log.error('AMQP Broker channel is not yet ready')
             defer.returnValue(False)
 
-        # Fix prefetch limit per consumer to 1 to get correct throttling
-        yield self.amqpBroker.chan.basic_qos(prefetch_count=1)
-
         # Declare queues
         # First declare the messaging exchange (has no effect if its already declared)
         yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
@@ -378,6 +445,17 @@ class SMPPClientManagerPB(pb.Avatar):
             if connector['consumer_tag'] is not None:
                 self.log.debug('Stopping submit_sm_q consumer in connector [%s]', cid)
                 yield self.amqpBroker.chan.basic_cancel(consumer_tag=connector['consumer_tag'])
+            
+            # Fix prefetch limit per consumer to 1 to get correct throttling
+            if connector['config'].submit_sm_throughput > 0:
+                prefetch_count = 1
+            else:
+                # set prefetch_count to the absolute submit_sm_throughput value. it's negative or zero now
+                prefetch_count = connector['config'].submit_sm_throughput * -1
+
+            self.log.debug('Setting prefetch_count to %s for connector [%s]', prefetch_count, connector['id'])
+            
+            yield self.amqpBroker.chan.basic_qos(prefetch_count=prefetch_count)
 
             # Start a new consumer
             yield self.amqpBroker.chan.basic_consume(queue=submit_sm_queue,
