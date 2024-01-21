@@ -49,6 +49,9 @@ class AmqpConfig(ConfigFile):
         self.reconnectOnConnectionLossDelay = self._getint('amqp-broker', 'connection_loss_retry_delay', 10)
         self.reconnectOnConnectionFailureDelay = self._getint(
             'amqp-broker', 'connection_failure_retry_delay', 10)
+        
+        # persistance of messages in case of broker restart
+        self.flag_persistent = self._getbool('amqp-broker', 'flag_persistent', True)
 
     def getSpec(self):
         """Will return the specifications from self.spec file"""
