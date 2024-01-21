@@ -214,7 +214,7 @@ class AmqpFactory(ClientFactory):
     def _got_channel(self, chan):
         self.log.info("Got channel")
 
-        self.chan = chan
+        self.chan = WrapperChan(chan=chan, flag_persistent=self.config.flag_persistent)
         self.queues = []
 
         d = self.chan.channel_open()
@@ -300,3 +300,28 @@ class AmqpFactory(ClientFactory):
     def disconnectAndDontRetryToConnect(self):
         self.stopConnectionRetrying()
         return self.disconnect()
+
+class WrapperChan:
+    """This is a wrapper to channel's publish method"""
+
+    def __init__(self, chan, flag_persistent: bool = False):
+        self.chan = chan
+        self.flag_persistent = flag_persistent
+
+    def basic_publish(self, *args, **keys):
+        if self.flag_persistent is True and "content" in keys:
+            keys["content"]["delivery-mode"] = 2 # specs: amqp0-9-1
+        return self.chan.basic_publish(*args, **keys)
+
+    def exchange_declare(self, *args, **keys):
+        if "durable" not in keys:
+            keys["durable"] = True
+        return self.chan.exchange_declare(*args, **keys)
+
+    def queue_declare(self, *args, **keys):
+        if "durable" not in keys:
+            keys["durable"] = True
+        return self.chan.queue_declare(*args, **keys)
+    
+    def __getattr__(self, __name: str):
+        return getattr(self.chan, __name)
