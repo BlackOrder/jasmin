@@ -79,7 +79,15 @@ class JCliFactory(ServerFactory):
 
         # Wait for AMQP to get ready
         self.log.info("Waiting for AMQP to get ready")
-        yield self.pb['smppcm'].amqpBroker.channelReady
+        if self.pb['smppcm'].amqpBroker.connected is False:
+            try:
+                if self.pb['smppcm'].amqpBroker.connectionRetry is True:
+                    yield self.pb['smppcm'].amqpBroker.getChannelReadyDeferred()
+                else:
+                    raise Exception("Connection retry is disabled")
+            except Exception as e:
+                self.log.error("AMQP Broker is not connected and will not be connected: %s" % e)
+                defer.returnValue(False)
 
         # Load configuration profile
         proto = self.buildProtocol(('127.0.0.1', 0))
