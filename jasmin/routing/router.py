@@ -77,10 +77,17 @@ class RouterPB(pb.Avatar):
         self.amqpBroker = amqpBroker
         self.log.info('Added amqpBroker to RouterPB')
 
-        if not self.amqpBroker.connected:
+        if self.amqpBroker.connected is False:
             self.log.warning('AMQP Broker channel is not yet ready, waiting for it to become ready.')
-            yield self.amqpBroker.channelReady
-            self.log.info("AMQP Broker channel is ready now, let's go !")
+            try:
+                if self.amqpBroker.connectionRetry is True:
+                    yield self.amqpBroker.getChannelReadyDeferred()
+                    self.log.info("AMQP Broker channel is ready now, let's go !")
+                else:
+                    raise Exception("Connection retry is disabled")
+            except Exception as e:
+                self.log.error("AMQP Broker is not connected and will not be connected: %s" % e)
+                defer.returnValue(False)
 
         # Subscribe to deliver.sm.* queues
         yield self.amqpBroker.chan.exchange_declare(exchange='messaging', type='topic')
