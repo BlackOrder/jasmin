@@ -15,31 +15,31 @@ from jasmin.protocols.smpp.configs import SMPPServerPBClientConfig
 from jasmin.protocols.smpp.proxies import SMPPServerPBProxy
 from jasmin.queues.configs import AmqpConfig
 from jasmin.queues.factory import AmqpFactory
-from jasmin.routing.configs import DLRThrowerConfig
-from jasmin.routing.throwers import DLRThrower
+from jasmin.routing.configs import deliverSmThrowerConfig
+from jasmin.routing.throwers import deliverSmThrower
 from jasmin.config import ROOT_PATH
 from jasmin.bin import BaseDaemon
 
+
 CONFIG_PATH = os.getenv('CONFIG_PATH', '%s/etc/jasmin/' % ROOT_PATH)
 
-LOG_CATEGORY = "Dlr-daemon"
-
+LOG_CATEGORY = "jasmin-deliversm-daemon"
 
 class Options(usage.Options):
     optParameters = [
-        ['config', 'c', '%s/dlr.cfg' % CONFIG_PATH,
-         'Jasmin dlrd configuration file'],
+        ['config', 'c', '%s/deliversm.cfg' % CONFIG_PATH,
+         'Jasmin deliversmd configuration file'],
         ['id', 'i', 'master',
-         'Daemon id, need to be different for each dlrd daemon'],
+         'Daemon id, need to be different for each deliversmd daemon'],
     ]
 
     optFlags = [
     ]
 
 
-class DlrDaemon(BaseDaemon):
+class DeliverSmDaemon(BaseDaemon):
     def __init__(self, opt):
-        super(DlrDaemon, self).__init__(opt)
+        super(DeliverSmDaemon, self).__init__(opt)
 
         self.log = logging.getLogger(LOG_CATEGORY)
         self.log.setLevel(logging.INFO)
@@ -49,19 +49,20 @@ class DlrDaemon(BaseDaemon):
         self.log.addHandler(handler)
         self.log.propagate = False
 
+    @defer.inlineCallbacks
     def startAMQPBrokerService(self):
         """Start AMQP Broker"""
 
         AMQPServiceConfigInstance = AmqpConfig(self.options['config'])
         
         # This is a separate process: do not log to same log_file as Jasmin Daemon
-        AMQPServiceConfigInstance.log_file = '%s/dlrd-%s' % ntpath.split(AMQPServiceConfigInstance.log_file)
+        AMQPServiceConfigInstance.log_file = '%s/deliversmd-%s' % ntpath.split(AMQPServiceConfigInstance.log_file)
 
         self.components['amqp-broker-factory'] = AmqpFactory(AMQPServiceConfigInstance)
         self.components['amqp-broker-factory'].preConnect()
 
         # Add service
-        self.components['amqp-broker-client'] = reactor.connectTCP(
+        self.components['amqp-broker-client'] = yield reactor.connectTCP(
             AMQPServiceConfigInstance.host,
             AMQPServiceConfigInstance.port,
             self.components['amqp-broker-factory'])
@@ -91,28 +92,29 @@ class DlrDaemon(BaseDaemon):
         if self.components['smpps-pb-client'].isConnected:
             yield self.components['smpps-pb-client'].disconnect()
 
-    def startDLRThrowerService(self):
-        """Start DLRThrower"""
+    def startdeliverSmThrowerService(self):
+        """Start deliverSmThrower"""
 
-        DLRThrowerConfigInstance = DLRThrowerConfig(self.options['config'])
+        deliverThrowerConfigInstance = deliverSmThrowerConfig(self.options['config'])
         
-        # This is a separate process: do not log to same log_file as Jasmin sm-listener
-        DLRThrowerConfigInstance.log_file = '%s/dlrd-%s' % ntpath.split(DLRThrowerConfigInstance.log_file)
+        # This is a separate process: do not log to same log_file as Jasmin Daemon
+        deliverThrowerConfigInstance.log_file = '%s/deliversmd-%s' % ntpath.split(deliverThrowerConfigInstance.log_file)
+        
+        self.components['deliversm-thrower'] = deliverSmThrower(deliverThrowerConfigInstance)
+        self.components['deliversm-thrower'].addSmpps(self.components['smpps-pb-client'])
 
-        self.components['dlr-thrower'] = DLRThrower(DLRThrowerConfigInstance)
-        self.components['dlr-thrower'].addSmpps(self.components['smpps-pb-client'])
+        # AMQP Broker is used to listen to deliver_sm queue
+        return self.components['deliversm-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
 
-        # AMQP Broker is used to listen to DLRThrower queue
-        return self.components['dlr-thrower'].addAmqpBroker(self.components['amqp-broker-factory'])
-
-    def stopDLRThrowerService(self):
-        """Stop DLRThrower"""
-        return self.components['dlr-thrower'].stopService()
+    @defer.inlineCallbacks
+    def stopdeliverSmThrowerService(self):
+        """Stop deliverSmThrower"""
+        return self.components['deliversm-thrower'].stopService()
 
     @defer.inlineCallbacks
     def start(self):
-        """Start Dlr Daemon"""
-        self.log.info("Starting Dlr Daemon ...")
+        """Start Deliver-Sm Daemon"""
+        self.log.info("Starting Deliver-Sm Daemon ...")
 
         ########################################################
         # Start AMQP Broker
@@ -130,23 +132,23 @@ class DlrDaemon(BaseDaemon):
             try:
                 yield self.startSMPPServerPBClient()
                 self.log.info("  SMPPServerPBClient Started.")
-
+                
                 ########################################################
-                # Start DLRThrower
+                # Start deliverSmThrower
                 try:
-                    yield self.startDLRThrowerService()
-                    self.log.info("  DLRThrower Started.")
+                    yield self.startdeliverSmThrowerService()
+                    self.log.info("  deliverSmThrower Started.")
 
                 except Exception as e:
-                    self.log.error("  Cannot start DLRThrower: %s\n%s" % (e, traceback.format_exc()))
+                    self.log.error("  Cannot start deliverSmThrower: %s\n%s" % (e, traceback.format_exc()))
             except Exception as e:
                 self.log.error("  Cannot start SMPPServerPBClient: %s\n%s" % (e, traceback.format_exc()))
         except Exception as e:
             self.log.error("  Cannot start AMQP Broker: %s\n%s" % (e, traceback.format_exc()))
 
     def AMQPDownHandler(self, ignore=None):
-        """Handle AMQP Broker disconnection"""
-        self.log.error("AMQP Broker disconnected, pausing Dlrd services ...")
+        """Pause Deliver-Smd services"""
+        self.log.error("AMQP Broker disconnected, pausing Deliver-Smd services ...")
         if self.components['amqp-broker-factory'].connected is True:
             return self.refreshServices()
 
@@ -157,44 +159,44 @@ class DlrDaemon(BaseDaemon):
 
     @defer.inlineCallbacks
     def refreshServices(self, ignore=None):
-        """Refresh Dlrd services"""
-        self.log.info("Unpausing Dlrd services ...")
+        """Refresh Deliver-Smd services"""
+        self.log.info("Refreshing Deliver-Smd services ...")
 
         self.components['amqp-broker-factory'].getChannelDownDeferred().addCallback(self.AMQPDownHandler)
 
         ########################################################
         try:
-            # refresh DLRThrower
-            if 'dlr-thrower' in self.components:
-                yield self.stopDLRThrowerService()
-            yield self.startDLRThrowerService()
+            # Refresh deliverSmThrower
+            if 'deliversm-thrower' in self.components:
+                yield self.stopdeliverSmThrowerService()
+            yield self.startdeliverSmThrowerService()
         except Exception as e:
-            self.log.error("  Cannot refresh DLRThrower: %s\n%s" % (e, traceback.format_exc()))
+            self.log.error("  Cannot refresh deliverSmThrower: %s\n%s" % (e, traceback.format_exc()))
         else:
-            self.log.info("  DLRThrower Refreshed.")
+            self.log.info("  deliverSmThrower Refreshed.")
 
     @defer.inlineCallbacks
     def stop(self, ignore=None):
-        """Stop Dlr daemon"""
-        self.log.info("Stopping Dlr Daemon ...")
+        """Stop Deliver-Sm daemon"""
+        self.log.info("Stopping Deliver-Sm Daemon ...")
 
         if 'smpps-pb-client' in self.components:
             yield self.stopSMPPServerPBClient()
             self.log.info("  SMPPServerPBClient Started.")
 
-        if 'dlr-thrower' in self.components:
-            yield self.stopDLRThrowerService()
-            self.log.info("  DLRThrower stopped.")
+        if 'deliversm-thrower' in self.components:
+            yield self.stopdeliverSmThrowerService()
+            self.log.info("  deliverSmThrower stopped.")
 
         if 'amqp-broker-client' in self.components:
             yield self.stopAMQPBrokerService()
             self.log.info("  AMQP Broker disconnected.")
         
-        reactor.stop()
+        yield reactor.stop()
 
     def sighandler_stop(self, signum, frame):
         """Handle stop signal cleanly"""
-        self.log.info("Received signal to stop Dlr Daemon")
+        self.log.info("Received signal to stop Deliver-Sm Daemon")
 
         return self.stop()
 
@@ -205,18 +207,18 @@ if __name__ == '__main__':
         options.parseOptions()
 
         # Must not be executed simultaneously (c.f. #265)
-        lock = FileLock("/tmp/dlrd-%s" % options['id'])
+        lock = FileLock("/tmp/deliversmd-%s" % options['id'])
 
         # Ensure there are no paralell runs of this script
         lock.acquire(timeout=2)
 
         # Prepare to start
-        dlr_d = DlrDaemon(options)
+        deliversm_d = DeliverSmDaemon(options)
         # Setup signal handlers
-        signal.signal(signal.SIGINT, dlr_d.sighandler_stop)
-        signal.signal(signal.SIGTERM, dlr_d.sighandler_stop)
-        # Start DlrDaemon
-        dlr_d.start()
+        signal.signal(signal.SIGINT, deliversm_d.sighandler_stop)
+        signal.signal(signal.SIGTERM, deliversm_d.sighandler_stop)
+        # Start DeliverSmDaemon
+        deliversm_d.start()
 
         reactor.run()
     except usage.UsageError as errortext:
@@ -225,7 +227,7 @@ if __name__ == '__main__':
     except LockTimeout:
         print("Lock not acquired ! exiting")
     except AlreadyLocked:
-        print("There's another instance on dlrd running, exiting.")
+        print("There's another instance on deliversmd running, exiting.")
     finally:
         # Release the lock
         if lock is not None and lock.i_am_locking():
