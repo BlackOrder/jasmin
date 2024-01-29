@@ -7,4 +7,4 @@ class AmqpProtocol(AMQClient):
         self.factory.log.info("Connection made to %s:%s" % (self.factory.config.host, self.factory.config.port))
         AMQClient.connectionMade(self)
 
-        self.factory.connectDeferred.callback(self)
+        self.factory.getConnectDeferred().callback(self)
