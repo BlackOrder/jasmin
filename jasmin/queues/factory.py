@@ -83,6 +83,11 @@ class AmqpFactory(ClientFactory):
 
     def startedConnecting(self, connector):
         self.log.info("Connecting to %s ...", connector.getDestination())
+    
+    def getConnectDeferred(self):
+        """Get a Deferred so you can be notified when connection is ready
+        """
+        return self._connectDeferred
 
     def getExitDeferred(self):
         """Get a Deferred so you can be notified on disconnect and exited
